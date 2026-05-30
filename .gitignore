@@ -1,0 +1,10 @@
+.env
+swarm-join-token.txt
+secrets/*
+!secrets/.gitignore
+*.pem
+*.key
+*.secret
+*.log
+.vagrant/
+Vagrantfile

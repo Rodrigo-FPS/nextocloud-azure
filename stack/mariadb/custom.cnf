@@ -1,0 +1,12 @@
+[mysqld]
+local_infile = 0
+skip_show_database
+bind-address = 0.0.0.0
+max_allowed_packet = 64M
+innodb_buffer_pool_size = 256M
+innodb_log_file_size = 64M
+innodb_flush_log_at_trx_commit = 2
+character_set_server = utf8mb4
+collation_server = utf8mb4_unicode_ci
+slow_query_log = 1
+long_query_time = 2

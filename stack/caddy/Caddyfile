@@ -1,0 +1,41 @@
+#MANAGER_IP se lee del entorno inyectado desde .env
+
+{
+    local_certs
+    admin off
+    default_sni {$MANAGER_IP:localhost}
+}
+
+#proxy hacia uptime-kuma por la red overlay los WebSockets se manejan automaticamente
+:3001 {
+    reverse_proxy uptime-kuma:3001
+}
+
+#redirige todo el trafico HTTP a HTTPS
+:80 {
+    redir https://{host}{uri} permanent
+}
+
+#termina TLS y hace proxy hacia Nextcloud
+https://{$MANAGER_IP:localhost}, https://localhost {
+    tls internal
+
+    encode gzip
+
+    reverse_proxy nextcloud:80 {
+        header_up X-Real-IP        {remote_host}
+        header_up X-Forwarded-For  {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up Host             {upstream_hostport}
+
+        transport http {
+            dial_timeout            30s
+            response_header_timeout 300s
+        }
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}

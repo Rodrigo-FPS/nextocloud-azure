@@ -1,0 +1,172 @@
+#stack completo para Docker Compose en un solo host
+#uso docker compose up -d
+
+services:
+
+  #proxy reverso HTTPS
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MANAGER_IP: "${MANAGER_IP:-localhost}"
+    volumes:
+      - ./stack/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - frontend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  #aplicacion principal
+  nextcloud:
+    image: nextcloud:28-apache
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: "db"
+      MYSQL_DATABASE: "nextcloud"
+      MYSQL_USER: "nextcloud_user"
+      MYSQL_PASSWORD_FILE: "/run/secrets/db_password"
+      NEXTCLOUD_ADMIN_USER: "admin"
+      NEXTCLOUD_ADMIN_PASSWORD_FILE: "/run/secrets/nextcloud_admin_password"
+      NEXTCLOUD_TRUSTED_DOMAINS: "${MANAGER_IP:-localhost} localhost 127.0.0.1"
+      TRUSTED_PROXIES: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+      OVERWRITEPROTOCOL: "https"
+      OVERWRITEHOST: "${MANAGER_IP:-localhost}"
+      OVERWRITECLIURL: "https://${MANAGER_IP:-localhost}"
+      PHP_MEMORY_LIMIT: "512M"
+      PHP_UPLOAD_LIMIT: "512M"
+      APACHE_DISABLE_REWRITE_IP: "1"
+    secrets:
+      - db_password
+      - nextcloud_admin_password
+      - redis_password
+    volumes:
+      - nextcloud_data:/var/www/html
+      - ./stack/nextcloud/redis-hook.sh:/docker-entrypoint-hooks.d/before-starting/setup-redis.sh:ro
+    networks:
+      - frontend
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  #base de datos
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    command:
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+      - "--local-infile=0"
+      - "--skip-name-resolve"
+      - "--skip-show-database"
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: "/run/secrets/db_root_password"
+      MYSQL_DATABASE: "nextcloud"
+      MYSQL_USER: "nextcloud_user"
+      MYSQL_PASSWORD_FILE: "/run/secrets/db_password"
+    secrets:
+      - db_root_password
+      - db_password
+    volumes:
+      - nextcloud_db:/var/lib/mysql
+      - ./stack/mariadb/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  #cache y bloqueo de archivos
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-c"
+      - 'exec redis-server /usr/local/etc/redis/redis.conf --requirepass "$$(cat /run/secrets/redis_password)"'
+    secrets:
+      - redis_password
+    volumes:
+      - nextcloud_redis:/data
+      - ./stack/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  #monitoreo de servicios
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - uptime_kuma_data:/app/data
+    networks:
+      - frontend
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+#volumenes persistentes
+volumes:
+  nextcloud_data:
+  nextcloud_db:
+  nextcloud_redis:
+  caddy_data:
+  caddy_config:
+  uptime_kuma_data:
+
+#redes
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true #DB y Redis sin acceso a internet
+
+#secrets leidos desde archivos en secrets/
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password
+  db_password:
+    file: ./secrets/db_password
+  redis_password:
+    file: ./secrets/redis_password
+  nextcloud_admin_password:
+    file: ./secrets/nextcloud_admin_password

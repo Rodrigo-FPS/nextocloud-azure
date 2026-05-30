@@ -1,0 +1,236 @@
+version: "3.9"
+
+#nodo manager corre caddy y nextcloud - nodo worker corre db redis y uptime-kuma
+#requiere MANAGER_IP en .env y los 4 secrets creados con setup-secrets.sh
+
+services:
+
+  #proxy reverso HTTPS
+  caddy:
+    image: caddy:2-alpine
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      update_config:
+        parallelism: 1
+        delay: 10s
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+      - target: 3001
+        published: 3001
+        protocol: tcp
+        mode: host
+    environment:
+      MANAGER_IP: "${MANAGER_IP}"
+    configs:
+      - source: caddy_config
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config_vol:/config
+    networks:
+      - frontend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  #aplicacion principal
+  nextcloud:
+    image: nextcloud:28-apache
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 30s
+    environment:
+      MYSQL_HOST: "db"
+      MYSQL_DATABASE: "nextcloud"
+      MYSQL_USER: "nextcloud_user"
+      MYSQL_PASSWORD_FILE: "/run/secrets/db_password"
+      NEXTCLOUD_ADMIN_USER: "admin"
+      NEXTCLOUD_ADMIN_PASSWORD_FILE: "/run/secrets/nextcloud_admin_password"
+      NEXTCLOUD_TRUSTED_DOMAINS: "${MANAGER_IP} localhost 127.0.0.1"
+      TRUSTED_PROXIES: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+      OVERWRITEPROTOCOL: "https"
+      OVERWRITEHOST: "${MANAGER_IP}"
+      OVERWRITECLIURL: "https://${MANAGER_IP}"
+      PHP_MEMORY_LIMIT: "512M"
+      PHP_UPLOAD_LIMIT: "512M"
+      APACHE_DISABLE_REWRITE_IP: "1"
+    secrets:
+      - db_password
+      - nextcloud_admin_password
+      - redis_password
+    configs:
+      - source: nextcloud_redis_hook
+        target: /docker-entrypoint-hooks.d/before-starting/setup-redis.sh
+        mode: 0755
+    volumes:
+      - nextcloud_data:/var/www/html
+    networks:
+      - frontend
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  #base de datos
+  db:
+    image: mariadb:10.11
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.role == worker
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: "/run/secrets/db_root_password"
+      MYSQL_DATABASE: "nextcloud"
+      MYSQL_USER: "nextcloud_user"
+      MYSQL_PASSWORD_FILE: "/run/secrets/db_password"
+    command:
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+      - "--local-infile=0"
+      - "--skip-name-resolve"
+      - "--skip-show-database"
+    secrets:
+      - db_root_password
+      - db_password
+    configs:
+      - source: mariadb_config
+        target: /etc/mysql/conf.d/custom.cnf
+        mode: 0444
+    volumes:
+      - nextcloud_db:/var/lib/mysql
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  #cache y bloqueo de archivos
+  redis:
+    image: redis:7-alpine
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.role == worker
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    command:
+      - "sh"
+      - "-c"
+      - 'exec redis-server /usr/local/etc/redis/redis.conf --requirepass "$$(cat /run/secrets/redis_password)"'
+    secrets:
+      - redis_password
+    configs:
+      - source: redis_config
+        target: /usr/local/etc/redis/redis.conf
+        mode: 0444
+    volumes:
+      - nextcloud_redis:/data
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  #monitoreo de servicios sin puertos publicados accesible via Caddy en el puerto 3001
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.role == worker
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    volumes:
+      - uptime_kuma_data:/app/data
+    networks:
+      - frontend
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+#volumenes persistentes
+volumes:
+  nextcloud_data:
+    driver: local
+  nextcloud_db:
+    driver: local
+  nextcloud_redis:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config_vol:
+    driver: local
+  uptime_kuma_data:
+    driver: local
+
+#redes overlay
+networks:
+  frontend:
+    driver: overlay
+    attachable: true
+  backend:
+    driver: overlay
+    attachable: false
+    internal: true #DB y Redis sin acceso a internet
+
+#secrets externos creados con setup-secrets.sh
+secrets:
+  db_root_password:
+    external: true
+  db_password:
+    external: true
+  redis_password:
+    external: true
+  nextcloud_admin_password:
+    external: true
+
+#archivos de configuracion inyectados como configs de Docker Swarm
+configs:
+  mariadb_config:
+    file: ./mariadb/custom.cnf
+  redis_config:
+    file: ./redis/redis.conf
+  caddy_config:
+    file: ./caddy/Caddyfile
+  nextcloud_redis_hook:
+    file: ./nextcloud/redis-hook.sh
